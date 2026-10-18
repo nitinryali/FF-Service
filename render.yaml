@@ -1,0 +1,38 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# One service: the Flag Service. MongoDB Atlas and Upstash Redis are managed
+# outside Render, so both are supplied as environment variables rather than
+# provisioned here.
+services:
+  - type: web
+    name: flag-service
+    runtime: docker
+    plan: free
+    # The Atlas cluster (mtm-aws-aps1-... = AWS ap-south-1, Mumbai) and the
+    # Upstash endpoints both sit in Mumbai. Render has no India region, so
+    # Singapore is the nearest option; Oregon would add ~250 ms per round trip.
+    region: singapore
+    # The build context must be flag-service/. The Dockerfile copies mvnw and
+    # .mvn/ from the context root, so building from the repo root fails.
+    dockerfilePath: ./flag-service/Dockerfile
+    dockerContext: ./flag-service
+    # Public, unauthenticated endpoint that returns 200 once the context is up.
+    # Unlike a Mongo-backed probe it needs no credentials, so it is safe here.
+    healthCheckPath: /v3/api-docs
+    # Deploy on every push to the linked branch. Later, switch to checksPass if
+    # you add the GitHub Actions pipeline from Requirement 8.
+    autoDeployTrigger: commit
+    envVars:
+      # Render generates a base64-encoded 256-bit value. Never hardcode this.
+      - key: JWT_SECRET
+        generateValue: true
+      # Prompted for in the Render Dashboard on the first sync. Include the
+      # database name in MONGODB_URI (.../ffproject) or writes land in "test".
+      - key: MONGODB_URI
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      # The built-in default is admin/admin. Override it before this endpoint is
+      # reachable by anyone.
+      - key: ADMIN_PASSWORD
+        sync: false
