@@ -36,8 +36,9 @@ This plan covers the Flag Service only. Tasks are scoped to writing and modifyin
     - _Requirements: 7.1_
 
   - [x] 1.5 Create multi-stage `Dockerfile`
-    - Stage 1: `FROM maven:3-eclipse-temurin-21 AS build` — copy `mvnw` + `.mvn/` + `pom.xml` + `src/`, then run `chmod +x mvnw && ./mvnw -B package -DskipTests`
+    - Stage 1: `FROM maven:3-eclipse-temurin-21 AS build` — copy `mvnw` + `.mvn/` + `pom.xml` + `src/`, then run `chmod +x mvnw && MAVEN_CONFIG= ./mvnw -B package -DskipTests`
     - The Maven wrapper must be copied into the build stage: the base image provides `mvn`, not `./mvnw`, so omitting it makes the image build fail
+    - `MAVEN_CONFIG` must be cleared on that call. The base image sets `MAVEN_CONFIG=/root/.m2`, and the Maven wrapper forwards that variable as a command-line argument (`${WRAPPER_LAUNCHER} $MAVEN_CONFIG "$@"` in `mvnw`), so Maven receives it as a lifecycle phase and fails with `Unknown lifecycle phase "/root/.m2"`. The bug is invisible on a host where `MAVEN_CONFIG` is unset, because the variable expands to nothing
     - Stage 2: `FROM eclipse-temurin:21-jre-alpine` — copy `target/*.jar` as `app.jar`, `EXPOSE 8001`, `ENTRYPOINT ["java","-jar","/app/app.jar"]`
     - _Requirements: 7.1, 7.3, 7.4_
 
