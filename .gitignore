@@ -1,0 +1,10 @@
+# Build output
+target/
+flag-service/target/
+
+# macOS
+.DS_Store
+
+# Local secrets and logs
+.env
+*.log
