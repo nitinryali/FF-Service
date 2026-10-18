@@ -1,0 +1,15 @@
+# Build output
+target/
+
+# Version control
+.git/
+
+# Documentation
+*.md
+
+# Environment files
+.env
+
+# IntelliJ IDEA
+**/*.iml
+.idea/

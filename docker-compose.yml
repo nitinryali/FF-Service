@@ -1,0 +1,131 @@
+# docker-compose.yml — local development stack for the FF Project.
+#
+# Brings up the Flag Service together with the MongoDB and Redis containers it
+# depends on, so that no local installation of either database is required
+# (Requirements 7.5, 7.6, 7.7).
+#
+#   docker compose up --build     # start everything
+#   docker compose down           # stop everything
+#   docker compose down -v        # stop and wipe the MongoDB volume
+#
+# The Flag Service connects to the databases by *service name* (`mongo`,
+# `redis`) over the shared `ffproject-network`, which is what makes
+# container-to-container communication work (Requirement 7.6).
+
+name: ffproject
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # MongoDB — persistent flag store (official image)
+  # ---------------------------------------------------------------------------
+  mongo:
+    image: mongo:latest
+    container_name: ffproject-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"          # exposed so the service can also be run from an IDE
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - ffproject-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Redis — Pub/Sub transport for flag change events (official image)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:latest
+    container_name: ffproject-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - ffproject-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Flag Service — REST API (:8001)
+  # ---------------------------------------------------------------------------
+  flag-service:
+    build:
+      context: ./flag-service
+    image: ffproject/flag-service:local
+    container_name: ffproject-flag-service
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8001
+
+      # Auth — override in a local .env file for anything but throwaway use.
+      # JWT_SECRET must be at least 32 bytes for HS256.
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-me-please-32b}
+      JWT_EXPIRY_SECONDS: ${JWT_EXPIRY_SECONDS:-3600}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+
+      # The localhost defaults in application.properties are only correct when
+      # the service runs on the host. Inside the compose network the databases
+      # are reached by service name instead (Requirement 7.6).
+      MONGODB_URI: mongodb://mongo:27017/ffproject
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "8001:8001"
+    networks:
+      - ffproject-network
+    healthcheck:
+      # Any permitAll endpoint proves the Spring context is up and serving.
+      # /v3/api-docs is used because no actuator dependency is present.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8001/v3/api-docs || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Order Service — reference consumer (:8002)
+  #
+  # Not implemented yet: per the Flag Service task plan, the Order Service is
+  # out of scope. Enable this block once order-service/ exists; the network,
+  # Redis, and MongoDB wiring below already matches the design (Requirements
+  # 7.2, 7.5).
+  # ---------------------------------------------------------------------------
+  # order-service:
+  #   build:
+  #     context: ./order-service
+  #   container_name: ffproject-order-service
+  #   restart: unless-stopped
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #   environment:
+  #     NODE_ENV: development
+  #     PORT: 8002
+  #     ORDER_SERVICE_FLAG_SERVICE_URL: http://flag-service:8001
+  #     REDIS_URL: redis://redis:6379
+  #   ports:
+  #     - "8002:8002"
+  #   networks:
+  #     - ffproject-network
+
+networks:
+  # Shared network: every container is addressable by its service name.
+  ffproject-network:
+    driver: bridge
+
+volumes:
+  mongo-data:
