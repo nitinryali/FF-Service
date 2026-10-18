@@ -32,7 +32,18 @@ COPY src ./src
 RUN chmod +x mvnw && MAVEN_CONFIG= ./mvnw -B package -DskipTests
 
 # Stage 2: Create runtime image
-FROM eclipse-temurin:21-jre-alpine
+#
+# Debian-based (glibc) on purpose — do not switch this to the -alpine variant.
+# Alpine ships musl libc, whose resolver cannot fall back to TCP and does not
+# implement the search-domain/ndots handling that glibc does. The MongoDB driver
+# resolves the Atlas shard hostnames through the system resolver
+# (InetAddress -> getaddrinfo); on musl that lookup can stall, so the driver
+# never opens a socket and every server sits in state=CONNECTING with no
+# exception until server selection times out — indistinguishable from a network
+# block. The SRV/TXT lookups still succeed under musl because the driver does
+# those in pure Java via JNDI, reading /etc/resolv.conf directly, which is why
+# this failure masquerades as a firewall problem.
+FROM eclipse-temurin:21-jre
 
 WORKDIR /app
 

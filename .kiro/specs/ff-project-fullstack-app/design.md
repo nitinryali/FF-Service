@@ -139,7 +139,7 @@ and `REDIS_URL` points the same configuration at MongoDB Atlas and Upstash Redis
 ```
 flag-service/
 ├── pom.xml                          # Maven build — Spring Boot 3.x parent
-├── Dockerfile                       # Multi-stage: maven:3-eclipse-temurin-21 → eclipse-temurin:21-jre-alpine
+├── Dockerfile                       # Multi-stage: maven:3-eclipse-temurin-21 → eclipse-temurin:21-jre (glibc, not -alpine)
 ├── .dockerignore
 └── src/
     └── main/

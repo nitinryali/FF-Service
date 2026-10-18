@@ -39,7 +39,8 @@ This plan covers the Flag Service only. Tasks are scoped to writing and modifyin
     - Stage 1: `FROM maven:3-eclipse-temurin-21 AS build` — copy `mvnw` + `.mvn/` + `pom.xml` + `src/`, then run `chmod +x mvnw && MAVEN_CONFIG= ./mvnw -B package -DskipTests`
     - The Maven wrapper must be copied into the build stage: the base image provides `mvn`, not `./mvnw`, so omitting it makes the image build fail
     - `MAVEN_CONFIG` must be cleared on that call. The base image sets `MAVEN_CONFIG=/root/.m2`, and the Maven wrapper forwards that variable as a command-line argument (`${WRAPPER_LAUNCHER} $MAVEN_CONFIG "$@"` in `mvnw`), so Maven receives it as a lifecycle phase and fails with `Unknown lifecycle phase "/root/.m2"`. The bug is invisible on a host where `MAVEN_CONFIG` is unset, because the variable expands to nothing
-    - Stage 2: `FROM eclipse-temurin:21-jre-alpine` — copy `target/*.jar` as `app.jar`, `EXPOSE 8001`, `ENTRYPOINT ["java","-jar","/app/app.jar"]`
+    - Stage 2: `FROM eclipse-temurin:21-jre` — copy `target/*.jar` as `app.jar`, `EXPOSE 8001`, `ENTRYPOINT ["java","-jar","/app/app.jar"]`
+    - Stage 2 must stay on the glibc (Debian) variant, not `-alpine`. Alpine's musl libc cannot fall back to TCP for DNS and mishandles search domains, and the Mongo driver resolves Atlas shard hostnames via the system resolver (`InetAddress` → `getaddrinfo`). On musl that lookup stalls, so the driver never connects and the cluster reports `state=CONNECTING` with no exception — which looks exactly like a blocked port. The SRV/TXT lookups still work on musl because the driver performs them in pure Java via JNDI
     - _Requirements: 7.1, 7.3, 7.4_
 
   - [x] 1.6 Create `.dockerignore`
