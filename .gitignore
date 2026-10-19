@@ -2,6 +2,9 @@
 target/
 flag-service/target/
 
+# Test artifacts
+.jqwik-database
+
 # macOS
 .DS_Store
 

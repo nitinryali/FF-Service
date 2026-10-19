@@ -21,6 +21,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.util.AntPathMatcher;
 import org.springframework.util.PathMatcher;
+import org.springframework.web.cors.CorsUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import javax.crypto.SecretKey;
@@ -45,7 +46,8 @@ import java.util.Map;
  *
  * <p>The following paths are skipped entirely: {@code /auth/**},
  * {@code /swagger-ui/**}, {@code /swagger-ui.html}, and
- * {@code /v3/api-docs/**}.</p>
+ * {@code /v3/api-docs/**}. CORS preflight requests are skipped too, so an
+ * {@code OPTIONS} probe is answered with CORS headers instead of a 401.</p>
  */
 @Component
 public class JwtFilter extends OncePerRequestFilter {
@@ -75,6 +77,10 @@ public class JwtFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
+        // Let the CORS filter answer preflight requests; they carry no token.
+        if (CorsUtils.isPreFlightRequest(request)) {
+            return true;
+        }
         String path = request.getRequestURI();
         return PUBLIC_PATH_PATTERNS.stream().anyMatch(pattern -> pathMatcher.match(pattern, path));
     }
