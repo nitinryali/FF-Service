@@ -40,15 +40,17 @@ Spring Boot 3.2 · Java 21 · MongoDB · Redis Pub/Sub · JWT
 
 ## Overview
 
-The Flag Service is the control plane of the FF Project feature-flag platform. It
-owns the authoritative flag state and announces every change to the rest of the
-system over Redis Pub/Sub.
+The Flag Service is a **multi-tenant** control plane for boolean feature flags.
+Multiple tenants share one deployment, but a tenant can only ever see and change
+its own flags. Every change is announced to the rest of the system over Redis
+Pub/Sub.
 
 | | |
 |---|---|
-| **Stores** | Boolean flags in a MongoDB `flags` collection |
-| **Secures** | Every `/flags/**` route with a stateless HS256 JWT |
-| **Publishes** | `{"name":…,"value":…,"event":…}` on the `flag-updates` channel |
+| **Stores** | Boolean flags in a MongoDB `flags` collection, partitioned by `tenantId` |
+| **Stores** | Tenants in `tenants`; login accounts (BCrypt hashes) in `users` |
+| **Secures** | Every `/flags/**` route with a stateless HS256 JWT **and** a mandatory `X-Tenant-Id` header |
+| **Publishes** | `{"tenantId":…,"name":…,"value":…,"version":…,"ts":…,"event":…}` on the `flag-updates` channel |
 | **Documents** | Itself at `/swagger-ui.html` |
 
 **Out of scope:** the consumer (Order Service), a frontend dashboard, CI/CD, and
@@ -70,7 +72,9 @@ flowchart LR
         direction TB
         Sec["SecurityFilterChain<br/>stateless · CSRF off"]
         Jwt{{"JwtFilter<br/>verify HS256 + expiry, else 401"}}
+        Tenant{{"TenantAccessInterceptor<br/>X-Tenant-Id required + tenant match, else 400/403"}}
         Auth["AuthController<br/>POST /auth/login"]
+        Admin["TenantController · /tenants<br/>UserController · /users"]
         Flags["FlagController<br/>/flags/**"]
         AS["AuthService"]
         FS["FlagService"]
@@ -78,15 +82,18 @@ flowchart LR
         Pub["FlagEventPublisher"]
     end
 
-    Mongo[("MongoDB<br/>flags collection")]
+    Mongo[("MongoDB<br/>flags · tenants · users")]
     Redis[("Redis Pub/Sub<br/>flag-updates")]
     Order(["Order Service<br/>:8002 · not yet built"])
 
     Client --> Sec
     Sec -->|"public · issues a JWT"| Auth
     Sec --> Jwt
-    Jwt -->|"token valid"| Flags
+    Jwt -->|"token valid"| Tenant
+    Jwt -->|"platform admin"| Admin
+    Tenant -->|"tenant allowed"| Flags
     Auth --> AS
+    Admin --> FS
     Flags --> FS
     FS --> Repo
     Repo --> Mongo
@@ -102,16 +109,21 @@ flowchart LR
 
 1. **`SecurityFilterChain` + `JwtFilter`** — there is no session and no login
    state. A single filter verifies the token's signature and expiry and rejects
-   the request with a JSON `401` before any controller runs. Nothing downstream
-   needs to know about authentication.
-2. **Controllers** — `AuthController` and `FlagController` are deliberately thin.
-   They never catch exceptions; all failure translation happens in
-   `GlobalExceptionHandler`, which keeps the status-code policy in exactly one
-   place.
-3. **`FlagService`** — owns the business rules. It is the only place that knows a
-   duplicate name means `409`, a missing flag means `404`, and a Mongo outage
-   means `503`. It also enforces the ordering guarantee: **persist first,
-   announce second.**
+   the request with a JSON `401` before any controller runs. On success it puts
+   the user's `tenantId` and `role` from the token claims into the
+   `SecurityContext`.
+2. **`TenantAccessInterceptor`** — every flag route must carry `X-Tenant-Id`.
+   A missing header is `400`; a tenant user naming a tenant other than their own
+   is `403`. Platform admins may operate across tenants, but the header is still
+   required. The validated id is passed to controllers as a request attribute.
+3. **Controllers** — `AuthController`, `FlagController`, `TenantController`, and
+   `UserController` are deliberately thin. They never catch exceptions; all
+   failure translation happens in `GlobalExceptionHandler`, which keeps the
+   status-code policy in exactly one place.
+4. **`FlagService`** — owns the business rules. It is the only place that knows a
+   duplicate name means `409`, a missing flag means `404`, a missing tenant means
+   `404`, and a Mongo outage means `503`. Every query is scoped by `tenantId`,
+   and it enforces the ordering guarantee: **persist first, announce second.**
 
 </details>
 
@@ -119,55 +131,76 @@ flowchart LR
 
 ## Authentication
 
-`POST /auth/login` exchanges admin credentials for a signed JWT. Every failure
-mode returns the *same* generic body, so a caller can never learn which field was
-wrong.
+`POST /auth/login` exchanges credentials from the MongoDB `users` collection for
+a signed JWT. Passwords are stored only as BCrypt hashes. The first platform
+administrator is **seeded at startup** from `ADMIN_USERNAME` / `ADMIN_PASSWORD`;
+those variables are bootstrap configuration, not a login shortcut. Every
+credential failure returns the *same* generic body, so a caller can never learn
+which field was wrong.
+
+Each token carries three claims the rest of the service relies on: `sub` (the
+username), `tenantId`, and `role` (`PLATFORM_ADMIN` or `TENANT_USER`).
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant C as Client
     participant F as JwtFilter
+    participant T as TenantAccessInterceptor
     participant AC as AuthController
     participant AS as AuthService
+    participant DB as MongoDB users
     participant FC as FlagController
 
     C->>AC: POST /auth/login
     activate AC
     AC->>AS: authenticate(username, password)
+    AS->>DB: findByUsername(username)
+    AS->>AS: BCrypt.matches(password, hash)
     alt credentials valid
-        AS-->>AC: ok
-        AC->>AS: generateToken(username)
-        AS-->>AC: signed JWT
-        AC-->>C: 200 {"token":"eyJ..."}
-    else bad / blank / over-length
+        AS-->>AC: AppUser
+        AC->>AS: generateToken(user)
+        AS-->>AC: JWT with sub + tenantId + role
+        AC-->>C: 200 {"token":…,"tenantId":…,"role":…}
+    else bad / blank / over-length / unknown user
         AS-->>AC: BadCredentialsException
         AC-->>C: 401 {"error":"Authentication failed"}
     end
     deactivate AC
 
-    C->>F: GET /flags with Bearer token
+    C->>F: GET /flags + Bearer token + X-Tenant-Id
     activate F
-    F->>F: verify signature + expiry
+    F->>F: verify signature, expiry, and claims
     alt token valid
-        F->>FC: continue the chain
-        FC-->>C: 200 [ ...flags ]
+        F->>T: continue the chain as AuthenticatedUser
+        T->>T: header present? tenant allowed?
+        alt tenant allowed
+            T->>FC: continue with validated tenant
+            FC-->>C: 200 [ ...flags ]
+        else missing header
+            T-->>C: 400 {"error":"Tenant header required (X-Tenant-Id)"}
+        else another tenant's id
+            T-->>C: 403 {"error":"Tenant access denied"}
+        end
     else missing / expired / tampered
         F-->>C: 401 {"error":"..."}
     end
     deactivate F
 ```
 
-| Rejection reason | Body |
-|---|---|
-| No `Authorization` header, or not `Bearer …` | `{"error":"Authentication required"}` |
-| Token expired | `{"error":"Token has expired"}` |
-| Token malformed, tampered, or wrong signature | `{"error":"Invalid token"}` |
-| Bad credentials at login | `{"error":"Authentication failed"}` |
+| Rejection reason | Status | Body |
+|---|---|---|
+| No `Authorization` header, or not `Bearer …` | `401` | `{"error":"Authentication required"}` |
+| Token expired | `401` | `{"error":"Token has expired"}` |
+| Token malformed, tampered, or wrong signature | `401` | `{"error":"Invalid token"}` |
+| Bad credentials at login | `401` | `{"error":"Authentication failed"}` |
+| Missing or blank `X-Tenant-Id` | `400` | `{"error":"Tenant header required (X-Tenant-Id)"}` |
+| Header names a tenant the user does not own | `403` | `{"error":"Tenant access denied"}` |
 
-The three `401` bodies above come from `JwtFilter`; the login failure comes from
-`AuthController`. Both bypass `GlobalExceptionHandler` for this case, because
-credential problems must map to `401` rather than the generic `400`.
+The `401` bodies come from `JwtFilter`; login failures come from
+`AuthController`; tenant header failures come from `TenantAccessInterceptor`.
+These bypass `GlobalExceptionHandler` because they must map to specific statuses
+rather than the generic `400`/`500` paths.
 
 ---
 
@@ -188,8 +221,8 @@ sequenceDiagram
     participant R as Redis
     participant O as Order Service
 
-    C->>FC: PATCH /flags/6650f1c2e4b0a1d3f8a91b23
-    FC->>FS: updateFlag("6650f1c2e4b0a1d3f8a91b23", true)
+    C->>FC: PATCH /flags/6650f1c2e4b0a1d3f8a91b23<br/>X-Tenant-Id: 66f0acme
+    FC->>FS: updateFlag("66f0acme", "6650f1c2e4b0a1d3f8a91b23", true)
     FS->>M: save(flag)
     alt write succeeds
         M-->>FS: saved flag
@@ -208,11 +241,19 @@ sequenceDiagram
 The published payload:
 
 ```json
-{ "name": "checkout-v2", "value": true, "event": "updated" }
+{
+  "tenantId": "66f0acme",
+  "name": "checkout-v2",
+  "value": true,
+  "version": 4,
+  "ts": "2026-10-18T12:34:56.789Z",
+  "event": "updated"
+}
 ```
 
 `event` is one of `created`, `updated`, or `deleted`. Deletions carry
-`"value": null`.
+`"value": null`. Consumers should **discard events whose `tenantId` they do not
+own** and ignore versions older than the one they already hold.
 
 ---
 
@@ -276,9 +317,11 @@ On Windows PowerShell, set the variable with
 <br/>
 
 1. Open <http://localhost:8001/swagger-ui.html>.
-2. Run `POST /auth/login`, copy the `token` from the response.
+2. Run `POST /auth/login`, copy the `token` (and note the `tenantId`) from the response.
 3. Click **Authorize** (top right), paste the token, and confirm.
-4. Every `/flags` operation is now callable from the browser.
+4. Every `/flags` operation is callable, but each also needs the
+   `X-Tenant-Id` header filled in (it is listed as a required parameter per
+   operation). `/tenants` and `/users` require a `PLATFORM_ADMIN` token.
 
 </details>
 
@@ -286,25 +329,37 @@ On Windows PowerShell, set the variable with
 
 ## API reference
 
-Base URL: `http://localhost:8001`. Everything under `/flags` requires
-`Authorization: Bearer <token>`.
+Base URL: `http://localhost:8001`.
+
+- Every route except `POST /auth/login` and the Swagger assets requires
+  `Authorization: Bearer <token>`.
+- Every `/flags/**` route **also** requires `X-Tenant-Id: <tenant id>`. A
+  tenant user must send their own tenant id; only a platform admin may send
+  another tenant's id.
 
 | Method | Path | Success | Purpose |
 |---|---|---|---|
 | `POST` | `/auth/login` | `200` | Exchange credentials for a JWT |
-| `POST` | `/flags` | `201` | Create a flag |
-| `GET` | `/flags` | `200` | List all flags |
-| `GET` | `/flags/{name}` | `200` | Fetch one flag by name |
-| `PATCH` | `/flags/{id}` | `200` | Update a flag's value by id |
-| `DELETE` | `/flags/{id}` | `204` | Delete a flag by id |
+| `POST` | `/tenants` | `201` | Create a tenant (platform admin) |
+| `GET` | `/tenants` | `200` | List tenants (platform admin) |
+| `GET` | `/tenants/{id}` | `200` | Fetch a tenant (platform admin) |
+| `DELETE` | `/tenants/{id}` | `204` | Delete a tenant and all its flags/users (platform admin) |
+| `POST` | `/users` | `201` | Create a tenant-bound user (platform admin) |
+| `POST` | `/flags` | `201` | Create a flag in the `X-Tenant-Id` tenant |
+| `GET` | `/flags` | `200` | List the `X-Tenant-Id` tenant's flags |
+| `GET` | `/flags/{name}` | `200` | Fetch one flag by name in that tenant |
+| `PATCH` | `/flags/{id}` | `200` | Update a flag's value by id in that tenant |
+| `DELETE` | `/flags/{id}` | `204` | Soft-delete a flag by id in that tenant |
 
 A flag resource looks like this:
 
 ```json
 {
   "id": "6650f1c2e4b0a1d3f8a91b23",
+  "tenantId": "66f0acme",
   "name": "checkout-v2",
   "value": true,
+  "version": 4,
   "createdAt": "2026-10-18T12:00:00Z",
   "updatedAt": "2026-10-18T12:34:56Z"
 }
@@ -324,11 +379,76 @@ curl -X POST http://localhost:8001/auth/login \
 `200`:
 
 ```json
-{ "token": "eyJhbGciOiJIUzI1NiJ9..." }
+{
+  "token": "eyJhbGciOiJIUzI1NiJ9...",
+  "tenantId": "66f0acme",
+  "role": "TENANT_USER"
+}
 ```
 
-`401` for bad credentials, blank fields, username over 64 characters, or password
-over 128 characters.
+`401` for bad credentials, unknown user, blank fields, username over 64
+characters, or password over 128 characters.
+
+On startup the service seeds one platform admin from `ADMIN_USERNAME` /
+`ADMIN_PASSWORD` if that username is not already in `users`. Every later account
+is created through `POST /users`.
+
+</details>
+
+<details>
+<summary><strong><code>POST /tenants</code></strong> — create a tenant</summary>
+
+<br/>
+
+Platform admin only. The name must match `^[a-zA-Z0-9\-_]{1,100}$` and is
+unique.
+
+```bash
+curl -X POST http://localhost:8001/tenants \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"acme"}'
+```
+
+`201` with the tenant (`id`, `name`, timestamps), `400` for an invalid name, or
+`409` if the name already exists.
+
+</details>
+
+<details>
+<summary><strong><code>DELETE /tenants/{id}</code></strong> — delete a tenant</summary>
+
+<br/>
+
+Platform admin only. This **cascades**: every flag and every user bound to the
+tenant is permanently removed, then the tenant itself is deleted.
+
+```bash
+curl -X DELETE http://localhost:8001/tenants/66f0acme \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+`204` on success, or `404` if no such tenant exists.
+
+</details>
+
+<details>
+<summary><strong><code>POST /users</code></strong> — create a tenant-bound user</summary>
+
+<br/>
+
+Platform admin only. The password is hashed with BCrypt before storage; the
+response never contains it.
+
+```bash
+curl -X POST http://localhost:8001/users \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"acme-bot","password":"s3cret","tenantId":"66f0acme"}'
+```
+
+`role` is optional and defaults to `TENANT_USER`. `201` on success, `404` if the
+tenant does not exist, or `409` if the username is taken.
 
 </details>
 
@@ -337,11 +457,13 @@ over 128 characters.
 
 <br/>
 
-The name must match `^[a-zA-Z0-9\-_]{1,100}$`.
+The name must match `^[a-zA-Z0-9\-_]{1,100}$` and is unique **within the
+tenant**.
 
 ```bash
 curl -X POST http://localhost:8001/flags \
   -H "Authorization: Bearer $TOKEN" \
+  -H "X-Tenant-Id: 66f0acme" \
   -H 'Content-Type: application/json' \
   -d '{"name":"checkout-v2","value":false}'
 ```
@@ -349,9 +471,11 @@ curl -X POST http://localhost:8001/flags \
 | Status | When |
 |---|---|
 | `201` | Created — a `created` event is published |
-| `400` | Name is blank or violates the pattern; body carries the violated rule |
+| `400` | Name is blank or invalid, or `X-Tenant-Id` is missing |
 | `401` | Missing or invalid token |
-| `409` | A flag with that name already exists |
+| `403` | The header names another tenant |
+| `404` | The tenant does not exist |
+| `409` | The name is already used in this tenant |
 | `503` | MongoDB is unreachable |
 
 </details>
@@ -362,10 +486,13 @@ curl -X POST http://localhost:8001/flags \
 <br/>
 
 ```bash
-curl http://localhost:8001/flags -H "Authorization: Bearer $TOKEN"
+curl http://localhost:8001/flags \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Tenant-Id: 66f0acme"
 ```
 
-Always `200`. Returns `[]` when no flags exist, and never touches Redis.
+Always `200`. Returns only the header-selected tenant's live flags, `[]` when
+there are none, and never touches Redis.
 
 </details>
 
@@ -375,10 +502,13 @@ Always `200`. Returns `[]` when no flags exist, and never touches Redis.
 <br/>
 
 ```bash
-curl http://localhost:8001/flags/checkout-v2 -H "Authorization: Bearer $TOKEN"
+curl http://localhost:8001/flags/checkout-v2 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Tenant-Id: 66f0acme"
 ```
 
-`200` with the flag, or `404 {"error":"Flag not found"}`.
+`200` with the flag, or `404 {"error":"Flag not found"}`. The name is only
+matched inside the header-selected tenant.
 
 </details>
 
@@ -392,12 +522,14 @@ The flag is addressed by its server-assigned `id`, not its name.
 ```bash
 curl -X PATCH http://localhost:8001/flags/6650f1c2e4b0a1d3f8a91b23 \
   -H "Authorization: Bearer $TOKEN" \
+  -H "X-Tenant-Id: 66f0acme" \
   -H 'Content-Type: application/json' \
   -d '{"value":true}'
 ```
 
-`200` with the updated flag, or `404` if no such flag exists. Publishes an
-`updated` event (carrying the flag's `name`) only after the write succeeds.
+`200` with the updated flag, or `404` if that id does not exist **in the
+header-selected tenant**. Publishes an `updated` event (carrying `tenantId` and
+`version`) only after the write succeeds.
 
 </details>
 
@@ -410,11 +542,14 @@ The flag is addressed by its server-assigned `id`, not its name.
 
 ```bash
 curl -X DELETE http://localhost:8001/flags/6650f1c2e4b0a1d3f8a91b23 \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Tenant-Id: 66f0acme"
 ```
 
-`204` with an empty body, or `404` if no such flag exists. Publishes a `deleted`
-event with `"value": null`.
+`204` with an empty body, or `404` if that id does not exist in the tenant.
+Deletion is a **soft delete** (`deletedAt` is set, the document stays in
+MongoDB), which frees the name for reuse. Publishes a `deleted` event with
+`"value": null`.
 
 </details>
 
@@ -429,9 +564,12 @@ single-key JSON envelope: `{"error": "..."}`.
 flowchart TD
     E{"What went wrong?"}
     E -->|"no / bad / expired JWT"| N401["401 · Authentication required<br/>Token has expired<br/>Invalid token"]
-    E -->|"name violates 1-100 pattern"| N400["400 · the violated rule"]
+    E -->|"missing X-Tenant-Id"| N400T["400 · Tenant header required (X-Tenant-Id)"]
+    E -->|"another tenant's id"| N403["403 · Tenant access denied"]
+    E -->|"invalid name or field"| N400["400 · the violated rule"]
     E -->|"unknown flag name or id"| N404["404 · Flag not found"]
-    E -->|"duplicate name on create"| N409["409 · Flag already exists"]
+    E -->|"unknown tenant"| N404T["404 · Tenant not found"]
+    E -->|"duplicate flag / tenant / user"| N409["409 · … already exists"]
     E -->|"MongoDB unreachable"| N503["503 · Service unavailable"]
     E -->|"anything else"| N500["500 · An unexpected error occurred"]
 ```
@@ -439,10 +577,16 @@ flowchart TD
 | Status | Body | Raised by |
 |---|---|---|
 | `400` | The violated field constraint | Bean validation on the request body |
+| `400` | `Tenant header required (X-Tenant-Id)` | `TenantAccessInterceptor` |
 | `401` | `Authentication required` / `Token has expired` / `Invalid token` | `JwtFilter` |
 | `401` | `Authentication failed` | `AuthController` (login only) |
+| `403` | `Tenant access denied` | `TenantAccessInterceptor` |
+| `403` | `Access denied` | Failed `@PreAuthorize` role check |
 | `404` | `Flag not found` | `FlagNotFoundException` |
+| `404` | `Tenant not found` | `TenantNotFoundException` |
 | `409` | `Flag already exists` | `FlagAlreadyExistsException` |
+| `409` | `Tenant already exists` | `TenantAlreadyExistsException` |
+| `409` | `User already exists` | `UserAlreadyExistsException` |
 | `503` | `Service unavailable` | `ServiceUnavailableException` — the cause is logged |
 | `500` | `An unexpected error occurred` | Catch-all; the stack trace is logged, never returned |
 
@@ -451,11 +595,16 @@ flowchart TD
 
 <br/>
 
-Uniqueness is enforced by a unique index on `name` in MongoDB, not by a
-read-then-write check. Two concurrent `POST`s with the same name therefore cannot
-both succeed: the loser gets a `DuplicateKeyException`, which is translated to
+Uniqueness is enforced by a **partial compound unique index** on
+`(tenantId, name)` in MongoDB, not by a read-then-write check. Two concurrent
+`POST`s for the same name in the same tenant therefore cannot both succeed: the
+loser gets a `DuplicateKeyException`, which is translated to
 `FlagAlreadyExistsException` and returned as `409`. No flag is created or
 modified by the losing request.
+
+The index is partial on `{"deletedAt": null}`, so soft-deleted flags do not
+reserve their name — the same name can be created again later. The same name in a
+*different* tenant is always allowed.
 
 </details>
 
@@ -479,14 +628,19 @@ point it at MongoDB Atlas and Upstash Redis instead, locally or on Render.
 | `SERVER_PORT` | `8001` | Listening port |
 | `JWT_SECRET` | *(none)* | **Required.** HS256 signing key, 32+ bytes |
 | `JWT_EXPIRY_SECONDS` | `3600` | Must be between `60` and `86400` |
-| `ADMIN_USERNAME` | `admin` | Single admin account |
-| `ADMIN_PASSWORD` | `admin` | Single admin account |
+| `ADMIN_USERNAME` | `admin` | Bootstrap platform-admin username, seeded into `users` if absent |
+| `ADMIN_PASSWORD` | `admin` | Bootstrap password; stored only as a BCrypt hash |
 | `MONGODB_URI` | `mongodb://localhost:27017/ffproject` | Include the database name (`/ffproject`) in the URI |
 | `REDIS_URL` | `redis://localhost:6379` | Use `rediss://…` for Upstash; TLS is enabled from the scheme |
 
 Out-of-range `JWT_EXPIRY_SECONDS` makes the service fail at startup rather than
 issue tokens with an unusable lifetime. A missing or too-short `JWT_SECRET`
 fails at startup as well.
+
+On startup an idempotent migration runs: existing flags are assigned to a
+`default` tenant (created if missing), backfilled with `version = 1`, audit
+fields, and `deletedAt = null`, and the legacy globally-unique `name_1` index is
+dropped in favour of the tenant-scoped compound index.
 
 ---
 
@@ -523,12 +677,17 @@ FF Project/
     ├── pom.xml
     └── src/main/
         ├── java/com/ffproject/flagservice/
-        │   ├── auth/                  # AuthController, AuthService, JwtFilter
-        │   ├── config/                # Security, Redis, Mongo, OpenAPI
+        │   ├── auth/                  # AuthController, JwtFilter, AppUser, UserController,
+        │   │   │                      # UserService, UserBootstrap, Role
+        │   │   └── dto/               # CreateUserRequest, UserResponse
+        │   ├── config/                # Security, Web (interceptors), Redis, Mongo, OpenAPI
         │   ├── exception/             # domain exceptions + GlobalExceptionHandler
         │   ├── flag/                  # Flag, FlagRepository, FlagService, FlagController
         │   │   └── dto/               # CreateFlagRequest, UpdateFlagRequest, FlagResponse
-        │   └── redis/                 # FlagEventPublisher
+        │   ├── migration/             # FlagDataMigration (tenant backfill, index cleanup)
+        │   ├── redis/                 # FlagEventPublisher
+        │   └── tenant/                # Tenant, TenantService, TenantController,
+        │                              # TenantAccessInterceptor
         └── resources/
             └── application.properties # the only config file — env vars with localhost defaults
 ```
@@ -603,12 +762,12 @@ and never fails the caller's request — a Redis problem leaves the flag persist
 and the HTTP response successful. Look for a `WARN` line:
 
 ```
-Redis publish failed for flag checkout-v2: ...
+Redis publish failed for flag checkout-v2 in tenant 66f0acme: ...
 ```
 
 If you see no such line but also no event, verify the subscriber is listening on
-the `flag-updates` channel and that both processes point at the same Redis
-instance.
+the `flag-updates` channel, that it accepts the event's `tenantId`, and that both
+processes point at the same Redis instance.
 
 </details>
 

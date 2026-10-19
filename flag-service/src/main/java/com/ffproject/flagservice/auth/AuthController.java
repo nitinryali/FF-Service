@@ -44,10 +44,11 @@ public class AuthController {
     }
 
     /**
-     * Authenticates the submitted credentials and returns a signed JWT.
+     * Authenticates the submitted credentials against the {@code users}
+     * collection and returns a signed JWT.
      *
      * @param request the validated login payload
-     * @return {@code 200 {"token": "..."}} on success, or
+     * @return {@code 200 {"token":…,"tenantId":…,"role":…}} on success, or
      *         {@code 401 {"error": "Authentication failed"}} on failure
      */
     @PostMapping("/login")
@@ -57,14 +58,18 @@ public class AuthController {
             @ApiResponse(responseCode = "401", description = "Authentication failed")
     })
     public ResponseEntity<Map<String, String>> login(@Valid @RequestBody LoginRequest request) {
+        AppUser user;
         try {
-            authService.authenticate(request.getUsername(), request.getPassword());
+            user = authService.authenticate(request.getUsername(), request.getPassword());
         } catch (BadCredentialsException ex) {
             return unauthorized();
         }
 
-        String token = authService.generateToken(request.getUsername());
-        return ResponseEntity.ok(Map.of("token", token));
+        String token = authService.generateToken(user);
+        return ResponseEntity.ok(Map.of(
+                "token", token,
+                "tenantId", user.getTenantId(),
+                "role", user.getRole().name()));
     }
 
     /**

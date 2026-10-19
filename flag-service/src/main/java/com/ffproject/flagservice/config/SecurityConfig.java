@@ -4,9 +4,12 @@ import com.ffproject.flagservice.auth.JwtFilter;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
@@ -20,14 +23,16 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
  * authorization decision.</p>
  *
  * <p>The login endpoint and the OpenAPI/Swagger UI assets are public; every
- * other request must carry a valid JWT (Requirements 1.6, 2.2, 2.7).</p>
+ * other request must carry a valid JWT.</p>
  *
- * <p>No {@code PasswordEncoder} is declared: credentials are compared directly
- * against the configured admin account inside {@code AuthService} and are never
- * hashed or stored, so there is no use for one here.</p>
+ * <p>Method security is enabled so platform-only routes can be guarded with
+ * {@code @PreAuthorize("hasRole('PLATFORM_ADMIN')")}. Passwords are stored as
+ * BCrypt hashes in the {@code users} collection, hence the
+ * {@link PasswordEncoder} bean.</p>
  */
 @Configuration
 @EnableWebSecurity
+@EnableMethodSecurity
 public class SecurityConfig {
 
     private final JwtFilter jwtFilter;
@@ -60,6 +65,17 @@ public class SecurityConfig {
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
+    }
+
+    /**
+     * BCrypt password hashing for accounts stored in the {@code users}
+     * collection.
+     *
+     * @return the password encoder used at login and user creation
+     */
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
     }
 
     /**

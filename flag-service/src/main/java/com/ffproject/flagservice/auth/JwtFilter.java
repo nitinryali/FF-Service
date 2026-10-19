@@ -15,6 +15,8 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.util.AntPathMatcher;
@@ -24,7 +26,6 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import javax.crypto.SecretKey;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -35,19 +36,25 @@ import java.util.Map;
  * whose {@code Authorization} header is missing, is not a Bearer token, or
  * carries a token that is expired, malformed, or tampered with. All rejections
  * are written as JSON directly to the response, so no downstream controller is
- * ever invoked and no flag data can be modified (Requirements 1.6, 2.2, 2.3,
- * 2.4, 2.7).</p>
+ * ever invoked.</p>
+ *
+ * <p>On success the filter places an {@link AuthenticatedUser} principal — the
+ * user's name, tenant, and role from the token claims — and the matching
+ * {@code ROLE_*} authority into the {@code SecurityContext}, where the tenant
+ * interceptor and method security read them from.</p>
  *
  * <p>The following paths are skipped entirely: {@code /auth/**},
  * {@code /swagger-ui/**}, {@code /swagger-ui.html}, and
- * {@code /v3/api-docs/**} (plus the bare {@code /v3/api-docs} path, which some
- * path matchers treat as distinct from the {@code /**} variant).</p>
+ * {@code /v3/api-docs/**}.</p>
  */
 @Component
 public class JwtFilter extends OncePerRequestFilter {
 
     /** Required prefix for the Authorization header value. */
     static final String BEARER_PREFIX = "Bearer ";
+
+    private static final String CLAIM_TENANT_ID = "tenantId";
+    private static final String CLAIM_ROLE = "role";
 
     /** Paths that never require a JWT. */
     private static final List<String> PUBLIC_PATH_PATTERNS = List.of(
@@ -66,12 +73,6 @@ public class JwtFilter extends OncePerRequestFilter {
         this.objectMapper = objectMapper;
     }
 
-    /**
-     * Skips JWT verification for the public paths listed above.
-     *
-     * @param request the incoming request
-     * @return {@code true} when the request must not be filtered
-     */
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
@@ -98,15 +99,22 @@ public class JwtFilter extends OncePerRequestFilter {
                     .parseSignedClaims(token)
                     .getPayload();
 
+            String username = claims.getSubject();
+            String tenantId = claims.get(CLAIM_TENANT_ID, String.class);
+            Role role = Role.valueOf(claims.get(CLAIM_ROLE, String.class));
+
+            AuthenticatedUser principal = new AuthenticatedUser(username, tenantId, role);
+            List<GrantedAuthority> authorities = List.of(new SimpleGrantedAuthority(role.authority()));
+
             UsernamePasswordAuthenticationToken authentication =
-                    new UsernamePasswordAuthenticationToken(claims.getSubject(), null, Collections.emptyList());
+                    new UsernamePasswordAuthenticationToken(principal, null, authorities);
             SecurityContextHolder.getContext().setAuthentication(authentication);
 
             filterChain.doFilter(request, response);
         } catch (ExpiredJwtException ex) {
             SecurityContextHolder.clearContext();
             writeError(response, "Token has expired");
-        } catch (JwtException | IllegalArgumentException ex) {
+        } catch (JwtException | IllegalArgumentException | NullPointerException ex) {
             SecurityContextHolder.clearContext();
             writeError(response, "Invalid token");
         }

@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -54,6 +55,50 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(FlagAlreadyExistsException.class)
     public ResponseEntity<Map<String, String>> handleFlagAlreadyExists(FlagAlreadyExistsException ex) {
         return errorResponse(HttpStatus.CONFLICT, "Flag already exists");
+    }
+
+    /**
+     * Handles requests for a tenant that does not exist.
+     *
+     * @param ex the raised exception
+     * @return {@code 404 {"error": "Tenant not found"}}
+     */
+    @ExceptionHandler(TenantNotFoundException.class)
+    public ResponseEntity<Map<String, String>> handleTenantNotFound(TenantNotFoundException ex) {
+        return errorResponse(HttpStatus.NOT_FOUND, "Tenant not found");
+    }
+
+    /**
+     * Handles attempts to create a tenant whose name is already taken.
+     *
+     * @param ex the raised exception
+     * @return {@code 409 {"error": "Tenant already exists"}}
+     */
+    @ExceptionHandler(TenantAlreadyExistsException.class)
+    public ResponseEntity<Map<String, String>> handleTenantAlreadyExists(TenantAlreadyExistsException ex) {
+        return errorResponse(HttpStatus.CONFLICT, "Tenant already exists");
+    }
+
+    /**
+     * Handles attempts to create a user whose username is already taken.
+     *
+     * @param ex the raised exception
+     * @return {@code 409 {"error": "User already exists"}}
+     */
+    @ExceptionHandler(UserAlreadyExistsException.class)
+    public ResponseEntity<Map<String, String>> handleUserAlreadyExists(UserAlreadyExistsException ex) {
+        return errorResponse(HttpStatus.CONFLICT, "User already exists");
+    }
+
+    /**
+     * Handles failed role checks from {@code @PreAuthorize}.
+     *
+     * @param ex the raised exception
+     * @return {@code 403 {"error": "Access denied"}}
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<Map<String, String>> handleAccessDenied(AccessDeniedException ex) {
+        return errorResponse(HttpStatus.FORBIDDEN, "Access denied");
     }
 
     /**
