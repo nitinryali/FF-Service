@@ -15,14 +15,14 @@ authoritative flag state, authenticates callers with JWTs, partitions all data
 by tenant, and announces changes so downstream services can evaluate flags
 locally instead of calling the API on every request.
 
-| | |
-|---|---|
-| **Port** | `8001` |
-| **Flag store** | MongoDB `flags` collection (one document per tenant + name) |
-| **Accounts** | MongoDB `users` collection, BCrypt password hashes, roles `PLATFORM_ADMIN` / `TENANT_USER` |
-| **Tenants** | MongoDB `tenants` collection |
-| **Events** | Redis channel `flag-updates` |
-| **API docs** | Swagger UI at `/swagger-ui.html` |
+|                |                                                                                            |
+| -------------- | ------------------------------------------------------------------------------------------ |
+| **Port**       | `8001`                                                                                     |
+| **Flag store** | MongoDB `flags` collection (one document per tenant + name)                                |
+| **Accounts**   | MongoDB `users` collection, BCrypt password hashes, roles `PLATFORM_ADMIN` / `TENANT_USER` |
+| **Tenants**    | MongoDB `tenants` collection                                                               |
+| **Events**     | Redis channel `flag-updates`                                                               |
+| **API docs**   | Swagger UI at `/swagger-ui.html`                                                           |
 
 ---
 
@@ -104,8 +104,6 @@ the request and never produces a phantom event.
   misses events and must re-fetch a snapshot.
 - One shared channel (`flag-updates`); consumers must filter by `tenantId`.
   There are no per-tenant channels yet.
-- No **rate limits or quotas** per tenant.
-- No **pagination** on flag or tenant lists.
 - Limited user management: create only — no list, update, role change, or delete.
 - Changing `ADMIN_USERNAME` / `ADMIN_PASSWORD` after first startup does **not**
   update the seeded account; delete or edit the user document to reset it.
@@ -114,9 +112,6 @@ the request and never produces a phantom event.
 - Platform admins may target any tenant via the header (intentional support
   access).
 - Tenant deletion is **irreversible** and cascades to flags and users.
-- No consumer service, frontend dashboard, or CI/CD pipeline is included in
-  this repository.
-- No automated test suite is present.
 
 ---
 
@@ -163,13 +158,13 @@ curl -s -X POST http://localhost:8001/users \
 
 ### 2. Configure the downstream service
 
-| Variable | Value |
-|---|---|
-| `FLAGS_SERVICE_URL` | `http://flag-service:8001` (compose) or your public URL |
-| `FLAGS_TENANT_ID` | the tenant id from step 1 |
-| `FLAGS_USERNAME` / `FLAGS_PASSWORD` | the service account from step 1 |
-| `FLAGS_SNAPSHOT_REFRESH_MS` | snapshot/JWT refresh interval, default `300000` |
-| `SPRING_DATA_REDIS_URL` | the same Redis instance the Flag Service publishes to |
+| Variable                            | Value                                                   |
+| ----------------------------------- | ------------------------------------------------------- |
+| `FLAGS_SERVICE_URL`                 | `http://flag-service:8001` (compose) or your public URL |
+| `FLAGS_TENANT_ID`                   | the tenant id from step 1                               |
+| `FLAGS_USERNAME` / `FLAGS_PASSWORD` | the service account from step 1                         |
+| `FLAGS_SNAPSHOT_REFRESH_MS`         | snapshot/JWT refresh interval, default `300000`         |
+| `SPRING_DATA_REDIS_URL`             | the same Redis instance the Flag Service publishes to   |
 
 ### 3. Subscribe and hydrate a local cache
 
@@ -222,19 +217,19 @@ Discard events for other tenants and versions you have already seen.
 All routes need `Authorization: Bearer <token>` except `/auth/login`.
 Routes under `/flags` also need `X-Tenant-Id`.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/auth/login` | Exchange credentials for a JWT |
-| `POST` | `/tenants` | Create a tenant (platform admin) |
-| `GET` | `/tenants` | List tenants (platform admin) |
-| `GET` | `/tenants/{id}` | Get a tenant (platform admin) |
+| Method   | Path            | Purpose                                                    |
+| -------- | --------------- | ---------------------------------------------------------- |
+| `POST`   | `/auth/login`   | Exchange credentials for a JWT                             |
+| `POST`   | `/tenants`      | Create a tenant (platform admin)                           |
+| `GET`    | `/tenants`      | List tenants (platform admin)                              |
+| `GET`    | `/tenants/{id}` | Get a tenant (platform admin)                              |
 | `DELETE` | `/tenants/{id}` | Delete a tenant, its flags, and its users (platform admin) |
-| `POST` | `/users` | Create a tenant-bound user (platform admin) |
-| `POST` | `/flags` | Create a flag in the header's tenant |
-| `GET` | `/flags` | List that tenant's live flags |
-| `GET` | `/flags/{name}` | Get a flag by name in that tenant |
-| `PATCH` | `/flags/{id}` | Update a flag's value by id |
-| `DELETE` | `/flags/{id}` | Soft-delete a flag by id |
+| `POST`   | `/users`        | Create a tenant-bound user (platform admin)                |
+| `POST`   | `/flags`        | Create a flag in the header's tenant                       |
+| `GET`    | `/flags`        | List that tenant's live flags                              |
+| `GET`    | `/flags/{name}` | Get a flag by name in that tenant                          |
+| `PATCH`  | `/flags/{id}`   | Update a flag's value by id                                |
+| `DELETE` | `/flags/{id}`   | Soft-delete a flag by id                                   |
 
 ### Flag example
 
