@@ -8,3 +8,5 @@ flag-service/target/
 # Local secrets and logs
 .env
 *.log
+
+.kiro/

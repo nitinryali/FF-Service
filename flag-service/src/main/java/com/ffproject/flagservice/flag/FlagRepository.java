@@ -31,11 +31,4 @@ public interface FlagRepository extends MongoRepository<Flag, String> {
      * @return true if a flag with the name exists, false otherwise
      */
     boolean existsByName(String name);
-
-    /**
-     * Deletes a Flag by its unique name.
-     *
-     * @param name the unique name of the flag to delete
-     */
-    void deleteByName(String name);
 }

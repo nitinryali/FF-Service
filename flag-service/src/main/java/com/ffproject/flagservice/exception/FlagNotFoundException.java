@@ -1,8 +1,8 @@
 package com.ffproject.flagservice.exception;
 
 /**
- * Raised when a flag is requested, updated, or deleted by a name that does not
- * exist in the store.
+ * Raised when a flag is requested by a name, or updated or deleted by an id,
+ * that does not exist in the store.
  *
  * <p>Mapped to HTTP 404 by {@link GlobalExceptionHandler} (Requirements 1.2, 1.4,
  * 1.5, 1.8).</p>

@@ -95,36 +95,63 @@ public class FlagService {
     }
 
     /**
-     * Replaces a flag's boolean value, then announces the change.
+     * Looks up a single flag by its server-assigned id.
      *
-     * @param name  the existing flag name
-     * @param value the new boolean value
-     * @return the updated flag
-     * @throws FlagNotFoundException if no flag has that name
+     * <p>Ids are the stable identity used by the mutation endpoints
+     * ({@code PATCH} and {@code DELETE}); a flag's name is only a unique
+     * human-readable label and may be reused after a deletion.</p>
+     *
+     * @param id the flag id
+     * @return the matching flag
+     * @throws FlagNotFoundException if no flag has that id
      * @throws ServiceUnavailableException if the store is unreachable
      */
-    public Flag updateFlag(String name, Boolean value) {
-        Flag flag = getFlagByName(name);
+    public Flag getFlagById(String id) {
+        try {
+            return flagRepository.findById(id).orElseThrow(FlagNotFoundException::new);
+        } catch (DataAccessException ex) {
+            throw new ServiceUnavailableException(ex);
+        }
+    }
+
+    /**
+     * Replaces a flag's boolean value, then announces the change.
+     *
+     * <p>The flag is located by id, but the change event is still published
+     * under the flag's name, which is the key consumer services cache on.</p>
+     *
+     * @param id    the existing flag id
+     * @param value the new boolean value
+     * @return the updated flag
+     * @throws FlagNotFoundException if no flag has that id
+     * @throws ServiceUnavailableException if the store is unreachable
+     */
+    public Flag updateFlag(String id, Boolean value) {
+        Flag flag = getFlagById(id);
         flag.setValue(value);
 
         Flag saved = saveExistingFlag(flag);
 
-        publishSafely(name, value, EVENT_UPDATED);
+        publishSafely(flag.getName(), value, EVENT_UPDATED);
         return saved;
     }
 
     /**
      * Removes a flag, then announces its deletion with a {@code null} value.
      *
-     * @param name the existing flag name
-     * @throws FlagNotFoundException if no flag has that name
+     * <p>The flag is located by id so that the deletion event can still carry
+     * the flag's name — the key consumer services cache on.</p>
+     *
+     * @param id the existing flag id
+     * @throws FlagNotFoundException if no flag has that id
      * @throws ServiceUnavailableException if the store is unreachable
      */
-    public void deleteFlag(String name) {
-        getFlagByName(name);
+    public void deleteFlag(String id) {
+        Flag flag = getFlagById(id);
+        String name = flag.getName();
 
         try {
-            flagRepository.deleteByName(name);
+            flagRepository.deleteById(id);
         } catch (DataAccessException ex) {
             throw new ServiceUnavailableException(ex);
         }

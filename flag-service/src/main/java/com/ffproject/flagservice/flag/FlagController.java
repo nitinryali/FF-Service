@@ -105,12 +105,12 @@ public class FlagController {
     /**
      * Updates a flag's boolean value.
      *
-     * @param name    the flag name
+     * @param id      the flag id
      * @param request the validated update payload
      * @return {@code 200} with the updated flag, or {@code 404} if absent
      */
-    @PatchMapping("/{name}")
-    @Operation(summary = "Update flag value")
+    @PatchMapping("/{id}")
+    @Operation(summary = "Update flag value by id")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Flag updated"),
             @ApiResponse(responseCode = "401", description = "Authentication required"),
@@ -118,20 +118,20 @@ public class FlagController {
             @ApiResponse(responseCode = "503", description = "Database unavailable")
     })
     public ResponseEntity<FlagResponse> updateFlag(
-            @Parameter(description = "Flag name") @PathVariable String name,
+            @Parameter(description = "Flag id") @PathVariable String id,
             @Valid @RequestBody UpdateFlagRequest request) {
-        Flag updated = flagService.updateFlag(name, request.getValue());
+        Flag updated = flagService.updateFlag(id, request.getValue());
         return ResponseEntity.ok(FlagResponse.from(updated));
     }
 
     /**
      * Deletes a flag.
      *
-     * @param name the flag name
+     * @param id the flag id
      * @return {@code 204} with no body, or {@code 404} if absent
      */
-    @DeleteMapping("/{name}")
-    @Operation(summary = "Delete flag")
+    @DeleteMapping("/{id}")
+    @Operation(summary = "Delete flag by id")
     @ApiResponses({
             @ApiResponse(responseCode = "204", description = "Flag deleted"),
             @ApiResponse(responseCode = "401", description = "Authentication required"),
@@ -139,8 +139,8 @@ public class FlagController {
             @ApiResponse(responseCode = "503", description = "Database unavailable")
     })
     public ResponseEntity<Void> deleteFlag(
-            @Parameter(description = "Flag name") @PathVariable String name) {
-        flagService.deleteFlag(name);
+            @Parameter(description = "Flag id") @PathVariable String id) {
+        flagService.deleteFlag(id);
         return ResponseEntity.noContent().build();
     }
 }

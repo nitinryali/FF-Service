@@ -188,8 +188,8 @@ sequenceDiagram
     participant R as Redis
     participant O as Order Service
 
-    C->>FC: PATCH /flags/checkout-v2
-    FC->>FS: updateFlag("checkout-v2", true)
+    C->>FC: PATCH /flags/6650f1c2e4b0a1d3f8a91b23
+    FC->>FS: updateFlag("6650f1c2e4b0a1d3f8a91b23", true)
     FS->>M: save(flag)
     alt write succeeds
         M-->>FS: saved flag
@@ -294,9 +294,9 @@ Base URL: `http://localhost:8001`. Everything under `/flags` requires
 | `POST` | `/auth/login` | `200` | Exchange credentials for a JWT |
 | `POST` | `/flags` | `201` | Create a flag |
 | `GET` | `/flags` | `200` | List all flags |
-| `GET` | `/flags/{name}` | `200` | Fetch one flag |
-| `PATCH` | `/flags/{name}` | `200` | Update a flag's value |
-| `DELETE` | `/flags/{name}` | `204` | Delete a flag |
+| `GET` | `/flags/{name}` | `200` | Fetch one flag by name |
+| `PATCH` | `/flags/{id}` | `200` | Update a flag's value by id |
+| `DELETE` | `/flags/{id}` | `204` | Delete a flag by id |
 
 A flag resource looks like this:
 
@@ -383,29 +383,33 @@ curl http://localhost:8001/flags/checkout-v2 -H "Authorization: Bearer $TOKEN"
 </details>
 
 <details>
-<summary><strong><code>PATCH /flags/{name}</code></strong> — update a flag</summary>
+<summary><strong><code>PATCH /flags/{id}</code></strong> — update a flag</summary>
 
 <br/>
 
+The flag is addressed by its server-assigned `id`, not its name.
+
 ```bash
-curl -X PATCH http://localhost:8001/flags/checkout-v2 \
+curl -X PATCH http://localhost:8001/flags/6650f1c2e4b0a1d3f8a91b23 \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"value":true}'
 ```
 
 `200` with the updated flag, or `404` if no such flag exists. Publishes an
-`updated` event only after the write succeeds.
+`updated` event (carrying the flag's `name`) only after the write succeeds.
 
 </details>
 
 <details>
-<summary><strong><code>DELETE /flags/{name}</code></strong> — delete a flag</summary>
+<summary><strong><code>DELETE /flags/{id}</code></strong> — delete a flag</summary>
 
 <br/>
 
+The flag is addressed by its server-assigned `id`, not its name.
+
 ```bash
-curl -X DELETE http://localhost:8001/flags/checkout-v2 \
+curl -X DELETE http://localhost:8001/flags/6650f1c2e4b0a1d3f8a91b23 \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -426,7 +430,7 @@ flowchart TD
     E{"What went wrong?"}
     E -->|"no / bad / expired JWT"| N401["401 · Authentication required<br/>Token has expired<br/>Invalid token"]
     E -->|"name violates 1-100 pattern"| N400["400 · the violated rule"]
-    E -->|"unknown flag name"| N404["404 · Flag not found"]
+    E -->|"unknown flag name or id"| N404["404 · Flag not found"]
     E -->|"duplicate name on create"| N409["409 · Flag already exists"]
     E -->|"MongoDB unreachable"| N503["503 · Service unavailable"]
     E -->|"anything else"| N500["500 · An unexpected error occurred"]
