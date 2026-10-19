@@ -171,217 +171,33 @@ curl -s -X POST http://localhost:8001/users \
 | `FLAGS_SNAPSHOT_REFRESH_MS` | snapshot/JWT refresh interval, default `300000` |
 | `SPRING_DATA_REDIS_URL` | the same Redis instance the Flag Service publishes to |
 
-### 3. Subscribe and hydrate a local cache (Java / Spring Boot)
+### 3. Subscribe and hydrate a local cache
 
-Dependencies:
+In the downstream service:
 
-```xml
-<dependency>
-  <groupId>org.springframework.boot</groupId>
-  <artifactId>spring-boot-starter-web</artifactId>
-</dependency>
-<dependency>
-  <groupId>org.springframework.boot</groupId>
-  <artifactId>spring-boot-starter-data-redis</artifactId>
-</dependency>
-```
-
-Configuration:
-
-```properties
-flags.service.url=http://flag-service:8001
-flags.tenant-id=66f0acme
-flags.username=acme-service
-flags.password=change-me
-flags.snapshot-refresh-ms=300000
-spring.data.redis.url=redis://redis:6379
-```
-
-The cache logs in, loads a snapshot, then applies tenant-filtered events:
-
-```java
-package com.example.flags;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.annotation.PostConstruct;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.redis.connection.Message;
-import org.springframework.data.redis.connection.MessageListener;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
-
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
-@Component
-public class FlagCache implements MessageListener {
-
-    public static final String TENANT_HEADER = "X-Tenant-Id";
-    public static final String CHANNEL = "flag-updates";
-
-    private static final Logger log = LoggerFactory.getLogger(FlagCache.class);
-
-    private final RestClient http;
-    private final ObjectMapper json;
-    private final String serviceUrl;
-    private final String tenantId;
-    private final String username;
-    private final String password;
-
-    private final Map<String, Boolean> values = new ConcurrentHashMap<>();
-    private final Map<String, Long> versions = new ConcurrentHashMap<>();
-
-    private volatile String token;
-
-    public FlagCache(RestClient.Builder http,
-                     ObjectMapper json,
-                     @Value("${flags.service.url}") String serviceUrl,
-                     @Value("${flags.tenant-id}") String tenantId,
-                     @Value("${flags.username}") String username,
-                     @Value("${flags.password}") String password) {
-        this.http = http.build();
-        this.json = json;
-        this.serviceUrl = serviceUrl;
-        this.tenantId = tenantId;
-        this.username = username;
-        this.password = password;
-    }
-
-    /** Evaluate a flag locally. Absent flags default to false. */
-    public boolean isEnabled(String name) {
-        return values.getOrDefault(name, false);
-    }
-
-    @PostConstruct
-    void start() {
-        refresh();
-    }
-
-    /**
-     * Re-logs in and reloads the snapshot. Running this periodically also
-     * repairs any events missed while the Redis subscriber was disconnected,
-     * and keeps the JWT fresh.
-     */
-    @Scheduled(fixedDelayString = "${flags.snapshot-refresh-ms:300000}")
-    public void refresh() {
-        try {
-            this.token = login();
-            loadSnapshot();
-        } catch (Exception ex) {
-            log.warn("Flag snapshot refresh failed: {}", ex.getMessage());
-        }
-    }
-
-    private String login() {
-        LoginResponse response = http.post()
-                .uri(serviceUrl + "/auth/login")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(new LoginRequest(username, password))
-                .retrieve()
-                .body(LoginResponse.class);
-
-        if (response == null || response.token() == null) {
-            throw new IllegalStateException("login returned no token");
-        }
-        return response.token();
-    }
-
-    private void loadSnapshot() {
-        FlagDto[] flags = http.get()
-                .uri(serviceUrl + "/flags")
-                .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
-                .header(TENANT_HEADER, tenantId)
-                .retrieve()
-                .body(FlagDto[].class);
-
-        values.clear();
-        versions.clear();
-        if (flags == null) {
-            return;
-        }
-        for (FlagDto flag : flags) {
-            values.put(flag.name(), flag.value());
-            versions.put(flag.name(), flag.version());
-        }
-    }
-
-    @Override
-    public void onMessage(Message message, byte[] pattern) {
-        try {
-            FlagEvent event = json.readValue(message.getBody(), FlagEvent.class);
-
-            if (!tenantId.equals(event.tenantId())) {
-                return; // another tenant: ignore
-            }
-
-            long seen = versions.getOrDefault(event.name(), -1L);
-            if (event.version() != null && event.version() <= seen) {
-                return; // stale or duplicate event
-            }
-
-            if ("deleted".equals(event.event())) {
-                values.remove(event.name());
-                versions.remove(event.name());
-            } else {
-                values.put(event.name(), event.value());
-                versions.put(event.name(), event.version());
-            }
-        } catch (Exception ex) {
-            log.warn("Ignoring malformed flag event: {}", ex.getMessage());
-        }
-    }
-
-    record LoginRequest(String username, String password) {}
-
-    record LoginResponse(String token) {}
-
-    record FlagDto(String name, Boolean value, Long version) {}
-
-    record FlagEvent(String tenantId, String name, Boolean value, Long version, String event) {}
-}
-```
-
-Register the listener with a `RedisMessageListenerContainer`:
-
-```java
-package com.example.flags;
-
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.listener.ChannelTopic;
-import org.springframework.data.redis.listener.RedisMessageListenerContainer;
-import org.springframework.scheduling.annotation.EnableScheduling;
-
-@Configuration
-@EnableScheduling
-public class RedisFlagSubscriptionConfig {
-
-    @Bean
-    RedisMessageListenerContainer flagSubscription(RedisConnectionFactory connectionFactory,
-                                                   FlagCache flagCache) {
-        RedisMessageListenerContainer container = new RedisMessageListenerContainer();
-        container.setConnectionFactory(connectionFactory);
-        container.addMessageListener(flagCache, new ChannelTopic(FlagCache.CHANNEL));
-        return container;
-    }
-}
-```
+1. Add `spring-boot-starter-data-redis` (and `spring-boot-starter-web` if it is
+   not already a web service).
+2. Point `spring.data.redis.url` at the same Redis instance the Flag Service
+   publishes to.
+3. On startup, log in with the service account via `POST /auth/login`, then call
+   `GET /flags` with `Authorization: Bearer <token>` and
+   `X-Tenant-Id: <tenant id>` to load the snapshot into memory.
+4. Register a listener on the `flag-updates` channel (for example with
+   `RedisMessageListenerContainer`).
+5. For each message, parse the JSON, ignore events whose `tenantId` is not
+   yours, and ignore versions you have already seen. Then set the flag in the
+   local map, or remove it when `event` is `deleted`.
+6. Keep the token and snapshot fresh by re-logging in and re-fetching the
+   snapshot periodically, below the JWT lifetime.
 
 ### 4. Recover after a disconnect
 
-Redis Pub/Sub does not replay messages. The scheduled `refresh()` above reloads
-the snapshot every `flags.snapshot-refresh-ms` (default 5 minutes), which closes
-the gap and refreshes the JWT. `RedisMessageListenerContainer` reconnects to
-Redis automatically.
+Redis Pub/Sub does not replay messages. Whenever the subscriber reconnects — or
+on startup — re-fetch the snapshot to close the gap.
+`RedisMessageListenerContainer` reconnects to Redis automatically.
 
-Keep `FLAGS_SNAPSHOT_REFRESH_MS` below `JWT_EXPIRY_SECONDS` (converted to
-milliseconds) so the cached token never expires between refreshes.
+Keep the periodic snapshot interval below `JWT_EXPIRY_SECONDS` so the cached
+token never expires between refreshes.
 
 ### 5. Event contract
 
