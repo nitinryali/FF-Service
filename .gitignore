@@ -13,6 +13,3 @@ flag-service/target/
 *.log
 
 .kiro/
-
-# Separate UI repository (has its own .git)
-ui/
